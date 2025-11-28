@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Magical Butterfly Catcher</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MediaPipe Dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Pacifico&family=Quicksand:wght@400;700&display=swap');
+
+        body {
+            font-family: 'Quicksand', sans-serif;
+            background: linear-gradient(135deg, #fbc2eb 0%, #a6c1ee 100%);
+            color: #4a4a4a;
+            overflow: hidden;
+            touch-action: none;
+        }
+
+        .magic-font {
+            font-family: 'Pacifico', cursive;
+        }
+
+        /* Canvas mirrors user to act like a Magic Mirror */
+        #output_canvas {
+            transform: scaleX(-1);
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+            filter: contrast(1.1) brightness(1.1) saturate(1.2); /* Dreamy filter */
+        }
+
+        /* UI overlay sits on top */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.4);
+            backdrop-filter: blur(8px);
+            border: 2px solid rgba(255, 255, 255, 0.6);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+
+        .sparkle-anim {
+            animation: floatUp 0.8s ease-out forwards;
+        }
+
+        @keyframes floatUp {
+            0% { transform: translateY(0) scale(1); opacity: 1; }
+            100% { transform: translateY(-50px) scale(1.5); opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+
+    <video id="input_video" style="display: none;"></video>
+    <canvas id="output_canvas"></canvas>
+
+    <div id="ui-layer" class="p-6">
+        
+        <!-- Top Bar -->
+        <div class="flex justify-between items-start w-full">
+            <div class="glass-panel p-4 rounded-3xl ml-24"> <!-- Margin for Stop Flower -->
+                <h1 class="text-3xl magic-font text-purple-600 drop-shadow-sm">Butterfly Catcher</h1>
+                <div class="text-purple-800 text-sm font-bold">Magical Mirror Mode</div>
+            </div>
+
+            <div class="glass-panel p-4 rounded-3xl text-right min-w-[120px]">
+                <div class="text-xs text-purple-800 uppercase tracking-widest font-bold">Butterflies</div>
+                <div id="score-display" class="text-4xl font-bold text-pink-600 magic-font">0</div>
+            </div>
+        </div>
+
+        <!-- Center Message Area -->
+        <div id="combo-display" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-center transition-opacity duration-200 opacity-0 pointer-events-none">
+            <h2 id="combo-text" class="text-6xl magic-font text-white drop-shadow-[0_0_10px_rgba(236,72,153,0.8)]">Magical!</h2>
+        </div>
+
+        <!-- Start Screen -->
+        <div id="menu-overlay" class="absolute inset-0 bg-white/60 flex flex-col items-center justify-center z-50 pointer-events-auto backdrop-blur-md">
+            <div class="text-center max-w-lg p-8 bg-white/80 rounded-3xl shadow-2xl border-4 border-pink-200">
+                <h1 class="text-6xl magic-font text-pink-500 mb-4">Enchanted Forest</h1>
+                <p class="text-xl text-gray-600 mb-8 font-bold">
+                    Stand back and use your hands to catch the butterflies.<br>
+                    <span class="text-pink-500">Pink = Left Hand</span> <br>
+                    <span class="text-teal-500">Teal = Right Hand</span>
+                </p>
+                
+                <div id="loading-spinner" class="hidden mb-4">
+                    <div class="animate-spin rounded-full h-12 w-12 border-b-4 border-pink-400 mx-auto"></div>
+                    <p class="mt-2 text-pink-500 font-bold">Summoning Fairies...</p>
+                </div>
+
+                <button id="start-btn" class="bg-gradient-to-r from-pink-400 to-purple-400 hover:from-pink-500 hover:to-purple-500 text-white text-3xl magic-font py-3 px-12 rounded-full transition transform hover:scale-105 shadow-lg">
+                    Start Magic
+                </button>
+            </div>
+        </div>
+
+        <!-- Bottom Bar -->
+        <div class="flex justify-between items-end w-full">
+            <div class="glass-panel p-3 rounded-full flex gap-4 px-6">
+                <div class="flex items-center gap-2">
+                    <div class="w-4 h-4 rounded-full bg-pink-400 shadow-[0_0_10px_pink]"></div>
+                    <span class="text-xs font-bold text-pink-700">Left Hand</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <div class="w-4 h-4 rounded-full bg-teal-400 shadow-[0_0_10px_teal]"></div>
+                    <span class="text-xs font-bold text-teal-700">Right Hand</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        /**
+         * MAGICAL AUDIO SYSTEM
+         * Soft chimes and twinkles instead of punches
+         */
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        function playSound(type) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            const now = audioCtx.currentTime;
+
+            if (type === 'catch') {
+                // High magical ting (Sine wave)
+                osc.type = 'sine';
+                // Randomize pitch slightly for variety
+                const freq = 800 + Math.random() * 400; 
+                osc.frequency.setValueAtTime(freq, now);
+                osc.frequency.exponentialRampToValueAtTime(freq * 1.5, now + 0.1);
+                
+                gainNode.gain.setValueAtTime(0, now);
+                gainNode.gain.linearRampToValueAtTime(0.3, now + 0.05);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, now + 1.5); // Long tail
+                
+                osc.start(now);
+                osc.stop(now + 1.5);
+
+            } else if (type === 'spawn') {
+                // Very soft low blip
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(400, now);
+                osc.frequency.linearRampToValueAtTime(600, now + 0.1);
+                
+                gainNode.gain.setValueAtTime(0, now);
+                gainNode.gain.linearRampToValueAtTime(0.05, now + 0.05);
+                gainNode.gain.linearRampToValueAtTime(0, now + 0.3);
+                
+                osc.start(now);
+                osc.stop(now + 0.3);
+
+            } else if (type === 'quit') {
+                // Harp-like strum down
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(600, now);
+                osc.frequency.exponentialRampToValueAtTime(200, now + 1);
+                
+                gainNode.gain.setValueAtTime(0.2, now);
+                gainNode.gain.linearRampToValueAtTime(0, now + 1);
+                
+                osc.start(now);
+                osc.stop(now + 1);
+            }
+        }
+
+        /**
+         * GAME STATE
+         */
+        const state = {
+            isPlaying: false,
+            score: 0,
+            targets: [], 
+            particles: [],
+            lastSpawnTime: 0,
+            spawnInterval: 1500, // Slower, more relaxing pace
+            width: 0,
+            height: 0
+        };
+
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const scoreEl = document.getElementById('score-display');
+        const menuOverlay = document.getElementById('menu-overlay');
+        const startBtn = document.getElementById('start-btn');
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const comboDisplay = document.getElementById('combo-display');
+        const comboText = document.getElementById('combo-text');
+        let cameraRunning = false;
+
+        /**
+         * BUTTERFLY CLASS (Replaces Target)
+         */
+        class Butterfly {
+            constructor(x, y, type) {
+                this.x = x; 
+                this.y = y; 
+                this.radius = 0.08; 
+                this.type = type; // 'left' (pink) or 'right' (teal)
+                this.active = true;
+                this.spawnTime = Date.now();
+                this.lifetime = 4000; // Live longer
+                this.flapSpeed = 0.1 + Math.random() * 0.1;
+            }
+
+            draw(ctx, w, h) {
+                if (!this.active) return;
+                
+                const screenX = this.x * w;
+                const screenY = this.y * h;
+                // Flapping animation logic
+                const age = Date.now() - this.spawnTime;
+                const flap = Math.sin(age * this.flapSpeed * 0.1); 
+                const wingScale = Math.abs(flap); // 0 to 1
+
+                ctx.save();
+                ctx.translate(screenX, screenY);
+
+                // Set Color
+                let colorBase, colorStroke;
+                if (this.type === 'left') {
+                    colorBase = 'rgba(244, 114, 182, 0.8)'; // Pink-400
+                    colorStroke = 'rgba(253, 230, 138, 1)'; // Gold
+                } else {
+                    colorBase = 'rgba(45, 212, 191, 0.8)'; // Teal-400
+                    colorStroke = 'rgba(196, 181, 253, 1)'; // Purple
+                }
+
+                // Draw Wings (Left and Right)
+                // Use scaleX to flip/flap wings
+                ctx.fillStyle = colorBase;
+                ctx.strokeStyle = colorStroke;
+                ctx.lineWidth = 2;
+
+                // Right Wing (Top)
+                ctx.beginPath();
+                ctx.ellipse(25 * wingScale, -15, 20 * wingScale, 30, Math.PI / 4, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.stroke();
+
+                // Right Wing (Bottom)
+                ctx.beginPath();
+                ctx.ellipse(20 * wingScale, 15, 15 * wingScale, 20, -Math.PI / 4, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.stroke();
+
+                // Left Wing (Top) - mirrored
+                ctx.beginPath();
+                ctx.ellipse(-25 * wingScale, -15, 20 * wingScale, 30, -Math.PI / 4, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.stroke();
+
+                // Left Wing (Bottom) - mirrored
+                ctx.beginPath();
+                ctx.ellipse(-20 * wingScale, 15, 15 * wingScale, 20, Math.PI / 4, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.stroke();
+
+                // Body
+                ctx.fillStyle = '#4a4a4a';
+                ctx.beginPath();
+                ctx.ellipse(0, 0, 5, 20, 0, 0, 2 * Math.PI);
+                ctx.fill();
+
+                // Antennae
+                ctx.beginPath();
+                ctx.moveTo(2, -15);
+                ctx.quadraticCurveTo(8, -25, 12, -22);
+                ctx.moveTo(-2, -15);
+                ctx.quadraticCurveTo(-8, -25, -12, -22);
+                ctx.stroke();
+
+                ctx.restore();
+            }
+        }
+
+        /**
+         * STOP FLOWER (Replaces Quit Button)
+         */
+        class StopFlower {
+            constructor() {
+                this.x = 0.90; // Visual Left (mirrored)
+                this.y = 0.10; 
+                this.radius = 0.06; 
+                this.angle = 0;
+            }
+
+            draw(ctx, w, h) {
+                if (!state.isPlaying) return;
+
+                const cx = this.x * w;
+                const cy = this.y * h;
+                const r = this.radius * w;
+
+                this.angle += 0.01;
+
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.rotate(this.angle);
+
+                // Draw Flower Petals
+                ctx.fillStyle = '#fca5a5'; // Red-300
+                for(let i=0; i<6; i++) {
+                    ctx.beginPath();
+                    ctx.ellipse(0, -r/1.5, r/3, r/1.5, 0, 0, 2 * Math.PI);
+                    ctx.fill();
+                    ctx.rotate(Math.PI / 3);
+                }
+
+                // Center
+                ctx.fillStyle = '#fef08a'; // Yellow
+                ctx.beginPath();
+                ctx.arc(0, 0, r/3, 0, 2*Math.PI);
+                ctx.fill();
+
+                ctx.restore();
+
+                // Label
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.scale(-1, 1); // Flip text back
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 16px Quicksand';
+                ctx.textAlign = 'center';
+                ctx.fillText('STOP', 0, r + 20);
+                ctx.restore();
+            }
+        }
+        const stopFlower = new StopFlower();
+
+        /**
+         * FAIRY DUST (Replaces Explosion)
+         */
+        class FairyDust {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.vx = (Math.random() - 0.5) * 0.01;
+                this.vy = -(Math.random() * 0.03 + 0.01); // Float UP
+                this.life = 1.0;
+                this.size = Math.random() * 0.01 + 0.002;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life -= 0.02; // Fade slower
+                this.vx += (Math.random() - 0.5) * 0.005; // Jitter
+            }
+
+            draw(ctx, w, h) {
+                ctx.globalAlpha = Math.max(0, this.life);
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                // Draw star shape or circle
+                ctx.arc(this.x * w, this.y * h, this.size * w, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        /**
+         * LOGIC
+         */
+        function spawnButterfly() {
+            if (!state.isPlaying) return;
+            
+            const isLeft = Math.random() > 0.5;
+            let x, y;
+
+            if (isLeft) {
+                x = 0.15 + (Math.random() * 0.25); 
+            } else {
+                x = 0.6 + (Math.random() * 0.25);
+            }
+            // Height variance
+            y = 0.2 + (Math.random() * 0.6);
+
+            const type = isLeft ? 'left' : 'right';
+            state.targets.push(new Butterfly(x, y, type));
+            playSound('spawn');
+            
+            // Interval gets slightly faster but stays relaxing
+            const speedMultiplier = Math.max(800, 1500 - (state.score * 5));
+            state.spawnInterval = speedMultiplier;
+        }
+
+        function createSparkles(x, y, isLeft) {
+            const color = isLeft ? '#f472b6' : '#2dd4bf'; // Pink or Teal
+            const gold = '#fde047';
+            for(let i=0; i<12; i++) {
+                state.particles.push(new FairyDust(x, y, Math.random() > 0.5 ? color : gold));
+            }
+        }
+
+        function showEncouragement() {
+            const phrases = ["Magical!", "Lovely!", "Sparkle!", "So Gentle!", "Perfect!"];
+            const text = phrases[Math.floor(Math.random() * phrases.length)];
+            comboText.innerText = text;
+            comboDisplay.classList.remove('opacity-0');
+            comboDisplay.classList.add('sparkle-anim');
+            setTimeout(() => {
+                comboDisplay.classList.add('opacity-0');
+                comboDisplay.classList.remove('sparkle-anim');
+            }, 800);
+        }
+
+        function stopGame() {
+            state.isPlaying = false;
+            state.targets = [];
+            state.particles = [];
+            menuOverlay.classList.remove('hidden');
+            playSound('quit');
+        }
+
+        function updateGame() {
+            if (!state.isPlaying) return;
+
+            const now = Date.now();
+
+            if (now - state.lastSpawnTime > state.spawnInterval) {
+                spawnButterfly();
+                state.lastSpawnTime = now;
+            }
+
+            state.targets = state.targets.filter(t => (now - t.spawnTime) < t.lifetime && t.active);
+            state.particles.forEach(p => p.update());
+            state.particles = state.particles.filter(p => p.life > 0);
+        }
+
+        function checkCollision(handX, handY, target) {
+            const dx = handX - target.x;
+            const dy = handY - target.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            return dist < (target.radius + 0.05); 
+        }
+
+        // MediaPipe setup
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        let camera = null;
+        
+        function startCamera() {
+            startBtn.classList.add('hidden');
+            loadingSpinner.classList.remove('hidden');
+
+            camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({image: videoElement});
+                },
+                width: 1280,
+                height: 720
+            });
+            camera.start().then(() => {});
+        }
+
+        function startGameLogic() {
+            loadingSpinner.classList.add('hidden'); 
+            menuOverlay.classList.add('hidden');
+            state.isPlaying = true;
+            state.score = 0;
+            scoreEl.innerText = '0';
+            state.lastSpawnTime = Date.now();
+            state.targets = [];
+            state.particles = [];
+            resizeCanvas();
+        }
+
+        function onResults(results) {
+            if (!loadingSpinner.classList.contains('hidden') && results.image) {
+                startGameLogic();
+            }
+
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            const w = canvasElement.width;
+            const h = canvasElement.height;
+
+            updateGame();
+
+            if (state.isPlaying) {
+                stopFlower.draw(canvasCtx, w, h);
+            }
+
+            if (results.multiHandLandmarks) {
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const landmarks = results.multiHandLandmarks[i];
+                    const handedness = results.multiHandedness[i]; 
+                    const label = handedness.label; 
+
+                    // Draw Magical Glow Hand Skeleton
+                    // drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: 'rgba(255,255,255,0.5)', lineWidth: 1});
+
+                    const pointer = landmarks[8]; // Index finger tip
+                    
+                    // Draw "Magic Wand" tip or Glow
+                    const px = pointer.x * w;
+                    const py = pointer.y * h;
+                    
+                    const glowColor = label === 'Left' ? 'rgba(244, 114, 182, 0.6)' : 'rgba(45, 212, 191, 0.6)';
+
+                    // Outer Glow
+                    const gradient = canvasCtx.createRadialGradient(px, py, 5, px, py, 40);
+                    gradient.addColorStop(0, 'white');
+                    gradient.addColorStop(0.4, glowColor);
+                    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+                    
+                    canvasCtx.fillStyle = gradient;
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(px, py, 40, 0, 2 * Math.PI);
+                    canvasCtx.fill();
+
+                    // Collision Check: Stop Flower
+                    if (state.isPlaying && checkCollision(pointer.x, pointer.y, stopFlower)) {
+                        stopGame();
+                        canvasCtx.restore();
+                        return; 
+                    }
+
+                    // Collision Check: Butterflies
+                    if (state.isPlaying) {
+                        state.targets.forEach(target => {
+                            const isCorrectHand = (label === 'Left' && target.type === 'left') || 
+                                                (label === 'Right' && target.type === 'right');
+
+                            if (target.active && isCorrectHand && checkCollision(pointer.x, pointer.y, target)) {
+                                target.active = false;
+                                state.score += 1; // Catching is gentle, 1 point
+                                scoreEl.innerText = state.score;
+                                playSound('catch');
+                                createSparkles(target.x, target.y, target.type === 'left');
+                                showEncouragement();
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Draw Butterflies & Dust
+            state.targets.forEach(t => t.draw(canvasCtx, w, h));
+            state.particles.forEach(p => p.draw(canvasCtx, w, h));
+
+            canvasCtx.restore();
+        }
+
+        function resizeCanvas() {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+            state.width = window.innerWidth;
+            state.height = window.innerHeight;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        
+        startBtn.addEventListener('click', () => {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            if (!cameraRunning) {
+                startCamera();
+                cameraRunning = true;
+            } else {
+                startGameLogic();
+            }
+        });
+
+    </script>
+</body>
+</html>
