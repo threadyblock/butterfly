@@ -96,8 +96,8 @@
         </div>
 
         <!-- Center Message Area -->
-        <div id="combo-display" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-center transition-opacity duration-200 opacity-0 pointer-events-none">
-            <h2 id="combo-text" class="text-5xl md:text-6xl whitespace-nowrap magic-font text-white drop-shadow-[0_0_10px_rgba(236,72,153,0.8)]">Magical!</h2>
+        <div id="combo-display" class="absolute top-1/2 left-1/2 w-full px-4 transform -translate-x-1/2 -translate-y-1/2 text-center transition-opacity duration-200 opacity-0 pointer-events-none">
+            <h2 id="combo-text" class="text-5xl md:text-6xl magic-font text-white drop-shadow-[0_0_10px_rgba(236,72,153,0.8)]">Magical!</h2>
         </div>
 
         <!-- Start Screen -->
@@ -214,6 +214,60 @@
             }
         }
 
+        // Cartoon roar: a wobbly low growl, softened so it's more silly than scary
+        function playRoar() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const now = audioCtx.currentTime;
+
+            const osc = audioCtx.createOscillator();
+            const wobble = audioCtx.createOscillator();
+            const wobbleGain = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+            const gainNode = audioCtx.createGain();
+
+            wobble.frequency.value = 18;
+            wobbleGain.gain.value = 15;
+            wobble.connect(wobbleGain);
+            wobbleGain.connect(osc.frequency);
+
+            filter.type = 'lowpass';
+            filter.frequency.value = 900;
+            osc.connect(filter);
+            filter.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(220, now);
+            osc.frequency.exponentialRampToValueAtTime(110, now + 0.9);
+            gainNode.gain.setValueAtTime(0, now);
+            gainNode.gain.linearRampToValueAtTime(0.18, now + 0.1);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, now + 1.0);
+
+            osc.start(now);
+            wobble.start(now);
+            osc.stop(now + 1.0);
+            wobble.stop(now + 1.0);
+        }
+
+        // Bouncy boop that climbs in pitch with every hit on the dragon
+        function playBoop(step) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            const freq = 300 + step * 45;
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(freq, now);
+            osc.frequency.exponentialRampToValueAtTime(freq * 1.6, now + 0.12);
+            gainNode.gain.setValueAtTime(0.25, now);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+            osc.start(now);
+            osc.stop(now + 0.25);
+        }
+
         // A rising run of bell-like notes, for special moments
         function playChime(freqs, spacing, volume) {
             if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -242,6 +296,11 @@
         const ROUND_DURATION = 60000; // 60 second rounds
         const GOLDEN_CHANCE = 0.07;   // Chance a new butterfly is golden
         const GOLDEN_POINTS = 5;
+        const BOSS_SCORE_THRESHOLD = 20; // Score that summons the secret dragon
+        const BOSS_HITS = 5;             // Boops needed to tame it
+        const BOSS_DURATION = 25000;     // How long it stays before flying away
+        const BOSS_HIT_COOLDOWN = 450;   // Pause between boops that count
+        const BOSS_BONUS = 50;
         const HIGH_SCORE_KEY = 'butterflyCatcherHighScore';
 
         // Phones and tablets get a lighter hand-tracking setup so they keep a smooth frame rate
@@ -259,6 +318,9 @@
             score: 0,
             caught: 0,
             goldenCaught: 0,
+            boss: null,
+            bossTriggered: false,
+            dragonTamed: false,
             roundEndTime: 0,
             highScore: 0,
             targets: [], 
@@ -543,6 +605,356 @@
         const stopFlower = new StopFlower();
 
         /**
+         * BOSS DRAGON (Secret!)
+         * Appears once per round when the score reaches BOSS_SCORE_THRESHOLD.
+         * Boop it BOSS_HITS times before it flies away to tame it.
+         */
+        class Dragon {
+            constructor() {
+                this.x = 0.5;
+                this.y = -0.3; // Swoops in from above
+                this.hits = 0;
+                this.mode = 'active'; // 'active', 'tamed' or 'fled'
+                this.spawnTime = Date.now();
+                this.lastHitTime = 0;
+                this.leaveTime = 0;
+                this.agility = 0.002; // How quickly it glides to its target (per ms)
+                this.pickNewTarget(Date.now(), 0.5, 0.45);
+            }
+
+            // Keep the whole dragon (wings and progress dots) on screen
+            bounds() {
+                const s = getSizeScale(state.width, state.height);
+                const marginX = 165 * s / state.width; // Wing tip reach
+                return {
+                    minX: Math.max(0.2, marginX),
+                    maxX: Math.min(0.8, 1 - marginX),
+                    minY: Math.max(0.3, 170 * s / state.height),
+                    maxY: Math.min(0.7, 1 - 110 * s / state.height)
+                };
+            }
+
+            pickNewTarget(now, x, y) {
+                if (x === undefined) {
+                    // Dart somewhere clearly different from where it is now
+                    const b = this.bounds();
+                    for (let i = 0; i < 10; i++) {
+                        x = b.minX + Math.random() * (b.maxX - b.minX);
+                        y = b.minY + Math.random() * (b.maxY - b.minY);
+                        if (Math.hypot(x - this.x, y - this.y) > 0.25) break;
+                    }
+                }
+                this.targetX = x;
+                this.targetY = y;
+                this.nextWanderTime = now + 2500;
+            }
+
+            hitArea(w, h) {
+                const s = getSizeScale(w, h);
+                return { cx: this.x * w, cy: this.y * h - 10 * s, r: 105 * s };
+            }
+
+            isTouching(path, w, h) {
+                const { cx, cy, r } = this.hitArea(w, h);
+                return distanceToSegment(cx, cy, path.fromX, path.fromY, path.toX, path.toY) < r;
+            }
+
+            // Returns true if the boop counted (there's a short pause between boops)
+            hit(now) {
+                if (this.mode !== 'active' || now - this.lastHitTime < BOSS_HIT_COOLDOWN) return false;
+                this.hits += 1;
+                this.lastHitTime = now;
+                this.agility += 0.0004; // A little quicker after every boop
+                this.pickNewTarget(now);
+                return true;
+            }
+
+            leave(mode, now) {
+                this.mode = mode;
+                this.leaveTime = now;
+                if (mode === 'fled') {
+                    this.targetY = -0.6;
+                    this.agility = 0.003;
+                }
+            }
+
+            isGone(now) {
+                return this.mode !== 'active' && now - this.leaveTime > 1500;
+            }
+
+            update(dt, now) {
+                if (this.mode === 'active' && now >= this.nextWanderTime) {
+                    this.pickNewTarget(now);
+                }
+                if (this.mode !== 'tamed') {
+                    const ease = 1 - Math.exp(-this.agility * dt);
+                    this.x += (this.targetX - this.x) * ease;
+                    this.y += (this.targetY - this.y) * ease;
+                }
+
+                // Little smoke puffs from its nose
+                if (this.mode === 'active' && Math.random() < dt * 0.002) {
+                    const s = getSizeScale(state.width, state.height);
+                    const noseY = this.y - 37 * s / state.height;
+                    for (let i = 0; i < 2; i++) {
+                        const puff = new FairyDust(this.x, noseY, 'rgba(229, 231, 235, 0.9)');
+                        puff.vy *= 0.4;
+                        state.particles.push(puff);
+                    }
+                }
+            }
+
+            drawWing(ctx, side, flap) {
+                ctx.save();
+                ctx.translate(side * 35, -5);
+                ctx.rotate(side * flap);
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.quadraticCurveTo(side * 60, -90, side * 125, -70);
+                ctx.quadraticCurveTo(side * 105, -40, side * 110, -20);
+                ctx.quadraticCurveTo(side * 85, -25, side * 75, 5);
+                ctx.quadraticCurveTo(side * 45, -5, 0, 30);
+                ctx.closePath();
+                ctx.fillStyle = '#c4b5fd'; // Violet-300
+                ctx.strokeStyle = '#7c3aed';
+                ctx.lineWidth = 4;
+                ctx.fill();
+                ctx.stroke();
+
+                // Wing bones
+                ctx.beginPath();
+                ctx.moveTo(0, 5);
+                ctx.lineTo(side * 110, -20);
+                ctx.moveTo(0, 5);
+                ctx.lineTo(side * 75, 5);
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            draw(ctx, w, h) {
+                const now = Date.now();
+                const s = getSizeScale(w, h);
+                const age = now - this.spawnTime;
+                const sinceHit = now - this.lastHitTime;
+                const flinching = sinceHit < 300;
+
+                let scale = 1;
+                let spin = 0;
+                if (this.mode === 'tamed') {
+                    // Happy spin, shrinking away
+                    const p = Math.min(1, (now - this.leaveTime) / 1200);
+                    scale = 1 - p;
+                    spin = p * Math.PI * 4;
+                }
+                const bob = Math.sin(age * 0.003) * 8;
+                const shake = flinching ? Math.sin(sinceHit * 0.2) * 8 : 0;
+
+                const bodyColor = '#4ade80';  // Green-400
+                const outline = '#15803d';    // Green-700
+
+                ctx.save();
+                ctx.translate(this.x * w + shake * s, this.y * h + bob * s);
+                ctx.scale(s * scale, s * scale);
+                ctx.rotate(spin);
+                if (flinching) ctx.scale(1.12, 0.9); // Squish!
+                ctx.lineJoin = 'round';
+                ctx.lineCap = 'round';
+
+                // Wings (behind the body)
+                const flap = Math.sin(age * 0.008) * 0.35;
+                this.drawWing(ctx, -1, flap);
+                this.drawWing(ctx, 1, flap);
+
+                // Tail with a spade tip
+                const wag = Math.sin(age * 0.005) * 15;
+                ctx.beginPath();
+                ctx.moveTo(25, 60);
+                ctx.quadraticCurveTo(100, 100 + wag, 105, 40 + wag / 2);
+                ctx.strokeStyle = outline;
+                ctx.lineWidth = 22;
+                ctx.stroke();
+                ctx.strokeStyle = bodyColor;
+                ctx.lineWidth = 15;
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(105, 22 + wag / 2);
+                ctx.lineTo(122, 50 + wag / 2);
+                ctx.lineTo(90, 47 + wag / 2);
+                ctx.closePath();
+                ctx.fillStyle = '#22c55e';
+                ctx.strokeStyle = outline;
+                ctx.lineWidth = 3;
+                ctx.fill();
+                ctx.stroke();
+
+                // Body and striped belly
+                ctx.beginPath();
+                ctx.ellipse(0, 35, 52, 58, 0, 0, 2 * Math.PI);
+                ctx.fillStyle = bodyColor;
+                ctx.strokeStyle = outline;
+                ctx.lineWidth = 4;
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.ellipse(0, 45, 32, 40, 0, 0, 2 * Math.PI);
+                ctx.fillStyle = '#fef3c7';
+                ctx.fill();
+                ctx.strokeStyle = '#fcd34d';
+                ctx.lineWidth = 3;
+                [25, 45, 65].forEach(y => {
+                    ctx.beginPath();
+                    ctx.moveTo(-24, y);
+                    ctx.quadraticCurveTo(0, y + 6, 24, y);
+                    ctx.stroke();
+                });
+
+                // Feet
+                [-1, 1].forEach(side => {
+                    ctx.beginPath();
+                    ctx.ellipse(side * 25, 92, 18, 10, 0, 0, 2 * Math.PI);
+                    ctx.fillStyle = '#22c55e';
+                    ctx.strokeStyle = outline;
+                    ctx.lineWidth = 3;
+                    ctx.fill();
+                    ctx.stroke();
+                });
+
+                // Horns
+                [-1, 1].forEach(side => {
+                    ctx.beginPath();
+                    ctx.moveTo(side * 16, -90);
+                    ctx.lineTo(side * 38, -88);
+                    ctx.lineTo(side * 36, -122);
+                    ctx.closePath();
+                    ctx.fillStyle = '#fcd34d';
+                    ctx.strokeStyle = '#b45309';
+                    ctx.lineWidth = 3;
+                    ctx.fill();
+                    ctx.stroke();
+                });
+
+                // Head spike
+                ctx.beginPath();
+                ctx.moveTo(-9, -100);
+                ctx.lineTo(0, -116);
+                ctx.lineTo(9, -100);
+                ctx.closePath();
+                ctx.fillStyle = '#22c55e';
+                ctx.strokeStyle = outline;
+                ctx.fill();
+                ctx.stroke();
+
+                // Head
+                ctx.beginPath();
+                ctx.arc(0, -55, 48, 0, 2 * Math.PI);
+                ctx.fillStyle = bodyColor;
+                ctx.strokeStyle = outline;
+                ctx.lineWidth = 4;
+                ctx.fill();
+                ctx.stroke();
+
+                // Snout, nostrils and smile
+                ctx.beginPath();
+                ctx.ellipse(0, -33, 30, 19, 0, 0, 2 * Math.PI);
+                ctx.fillStyle = '#86efac';
+                ctx.lineWidth = 3;
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#166534';
+                [-8, 8].forEach(x => {
+                    ctx.beginPath();
+                    ctx.ellipse(x, -37, 3, 4, 0, 0, 2 * Math.PI);
+                    ctx.fill();
+                });
+
+                ctx.beginPath();
+                ctx.arc(0, -30, 10, 0.15 * Math.PI, 0.85 * Math.PI);
+                ctx.strokeStyle = '#166534';
+                ctx.stroke();
+
+                // Rosy cheeks
+                ctx.fillStyle = 'rgba(244, 114, 182, 0.6)';
+                [-33, 33].forEach(x => {
+                    ctx.beginPath();
+                    ctx.arc(x, -42, 7, 0, 2 * Math.PI);
+                    ctx.fill();
+                });
+
+                // Eyes: happy when tamed, squeezed shut when booped, otherwise watching where it's going
+                ctx.strokeStyle = '#1f2937';
+                ctx.lineWidth = 3;
+                if (this.mode === 'tamed') {
+                    [-17, 17].forEach(x => {
+                        ctx.beginPath();
+                        ctx.arc(x, -60, 8, Math.PI, 2 * Math.PI);
+                        ctx.stroke();
+                    });
+                } else if (flinching) {
+                    [-1, 1].forEach(side => {
+                        ctx.beginPath();
+                        ctx.moveTo(side * 26, -70);
+                        ctx.lineTo(side * 12, -63);
+                        ctx.lineTo(side * 26, -56);
+                        ctx.stroke();
+                    });
+                } else {
+                    const look = Math.max(-3, Math.min(3, (this.targetX - this.x) * 40));
+                    [-17, 17].forEach(x => {
+                        ctx.beginPath();
+                        ctx.ellipse(x, -63, 11, 14, 0, 0, 2 * Math.PI);
+                        ctx.fillStyle = 'white';
+                        ctx.fill();
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.arc(x + look, -61, 6, 0, 2 * Math.PI);
+                        ctx.fillStyle = '#1f2937';
+                        ctx.fill();
+                        ctx.beginPath();
+                        ctx.arc(x + look + 2, -64, 2, 0, 2 * Math.PI);
+                        ctx.fillStyle = 'white';
+                        ctx.fill();
+                    });
+                }
+
+                ctx.restore();
+
+                if (this.mode === 'active') this.drawProgress(ctx, w, h, s, now);
+            }
+
+            // Boop counter dots and a bar showing how long until it flies away
+            drawProgress(ctx, w, h, s, now) {
+                const cx = this.x * w;
+                const top = this.y * h - 150 * s;
+                const spacing = 20 * s;
+                const startX = cx - spacing * (BOSS_HITS - 1) / 2;
+
+                ctx.save();
+                for (let i = 0; i < BOSS_HITS; i++) {
+                    ctx.beginPath();
+                    ctx.arc(startX + i * spacing, top, 7 * s, 0, 2 * Math.PI);
+                    ctx.fillStyle = i < this.hits ? '#fbbf24' : 'rgba(255, 255, 255, 0.4)';
+                    ctx.fill();
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+
+                const remaining = Math.max(0, 1 - (now - this.spawnTime) / BOSS_DURATION);
+                const barWidth = spacing * BOSS_HITS;
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+                ctx.fillRect(cx - barWidth / 2, top + 14 * s, barWidth, 6 * s);
+                ctx.fillStyle = '#f472b6';
+                ctx.fillRect(cx - barWidth / 2, top + 14 * s, barWidth * remaining, 6 * s);
+                ctx.restore();
+            }
+        }
+
+
+        /**
          * FAIRY DUST (Replaces Explosion)
          */
         class FairyDust {
@@ -621,9 +1033,9 @@
         let specialMessageUntil = 0;
 
         // Passing text marks a special message that ordinary praise won't cover up
-        function showEncouragement(text) {
+        function showEncouragement(text, duration = 800) {
             if (text) {
-                specialMessageUntil = Date.now() + 800;
+                specialMessageUntil = Date.now() + duration;
             } else {
                 if (Date.now() < specialMessageUntil) return;
                 const phrases = ["Magical!", "Lovely!", "Sparkle!", "So Gentle!", "Perfect!"];
@@ -634,16 +1046,53 @@
             clearTimeout(encouragementTimer);
             comboDisplay.classList.remove('sparkle-anim');
             void comboDisplay.offsetWidth;
+            comboDisplay.style.animationDuration = `${duration}ms`;
             comboDisplay.classList.remove('opacity-0');
             comboDisplay.classList.add('sparkle-anim');
             encouragementTimer = setTimeout(() => {
                 comboDisplay.classList.add('opacity-0');
                 comboDisplay.classList.remove('sparkle-anim');
-            }, 800);
+            }, duration);
+        }
+
+        function startBoss() {
+            state.bossTriggered = true;
+            state.boss = new Dragon();
+            playRoar();
+            showEncouragement('A Dragon Appears!', 1800);
+        }
+
+        function onDragonHit(dragon, now) {
+            playBoop(dragon.hits);
+            const s = getSizeScale(state.width, state.height);
+            const hitY = dragon.y - 10 * s / state.height;
+            for (let i = 0; i < 10; i++) {
+                state.particles.push(new FairyDust(dragon.x, hitY, Math.random() > 0.5 ? '#4ade80' : '#fde047'));
+            }
+
+            if (dragon.hits >= BOSS_HITS) {
+                dragon.leave('tamed', now);
+                state.dragonTamed = true;
+                state.score += BOSS_BONUS;
+                scoreEl.innerText = state.score;
+                const rainbow = ['#f472b6', '#fb923c', '#fde047', '#4ade80', '#2dd4bf', '#a78bfa'];
+                for (let i = 0; i < 60; i++) {
+                    state.particles.push(new FairyDust(dragon.x, dragon.y, rainbow[i % rainbow.length]));
+                }
+                playChime([523, 659, 784, 1047, 784, 1047, 1319, 1568], 0.1, 0.18);
+                showEncouragement(`Dragon Tamed! +${BOSS_BONUS}`, 2000);
+            }
+        }
+
+        function dragonFlee(dragon, now) {
+            dragon.leave('fled', now);
+            playSound('quit');
+            showEncouragement('The dragon flew away!', 1800);
         }
 
         function endRound(reason) {
             state.isPlaying = false;
+            state.boss = null;
             state.targets = [];
             state.particles = [];
             stopFlower.reset();
@@ -659,7 +1108,9 @@
             const plural = state.caught === 1 ? 'butterfly' : 'butterflies';
             let detail = `You caught ${state.caught} ${plural}`;
             if (state.goldenCaught > 0) detail += `, including ${state.goldenCaught} golden`;
-            resultsDetail.innerText = detail + '!';
+            detail += '!';
+            if (state.dragonTamed) detail += '\nYou tamed the dragon!';
+            resultsDetail.innerText = detail;
             newHighScoreEl.classList.toggle('hidden', !isNewHighScore);
             roundResults.classList.remove('hidden');
             instructionsEl.classList.add('hidden');
@@ -692,8 +1143,24 @@
             if (!state.isPlaying) return;
 
             const now = Date.now();
-            const dt = Math.min(100, now - state.lastUpdateTime); // Cap jumps after stalls
+            const elapsed = now - state.lastUpdateTime;
+            const dt = Math.min(100, elapsed); // Cap jumps after stalls
             state.lastUpdateTime = now;
+
+            if (!state.bossTriggered && state.score >= BOSS_SCORE_THRESHOLD) {
+                startBoss();
+            }
+
+            const boss = state.boss;
+            if (boss) {
+                // The round clock pauses while the dragon is out
+                state.roundEndTime += elapsed;
+                if (boss.mode === 'active' && now - boss.spawnTime > BOSS_DURATION) {
+                    dragonFlee(boss, now);
+                }
+                boss.update(dt, now);
+                if (boss.isGone(now)) state.boss = null;
+            }
 
             updateTimer(now);
             if (now >= state.roundEndTime) {
@@ -701,7 +1168,8 @@
                 return;
             }
 
-            if (now - state.lastSpawnTime > state.spawnInterval) {
+            // No new butterflies while the dragon is visiting
+            if (!state.boss && now - state.lastSpawnTime > state.spawnInterval) {
                 spawnButterfly();
                 state.lastSpawnTime = now;
             }
@@ -816,6 +1284,9 @@
             state.score = 0;
             state.caught = 0;
             state.goldenCaught = 0;
+            state.boss = null;
+            state.bossTriggered = false;
+            state.dragonTamed = false;
             scoreEl.innerText = '0';
             state.roundEndTime = Date.now() + ROUND_DURATION;
             updateTimer(Date.now());
@@ -854,6 +1325,7 @@
             const now = Date.now();
             const sizeScale = getSizeScale(w, h);
             const handsSeen = new Set();
+            const pathsThisFrame = [];
 
             if (results.multiHandLandmarks) {
                 for (let i = 0; i < results.multiHandLandmarks.length; i++) {
@@ -888,6 +1360,7 @@
                     canvasCtx.fill();
 
                     const path = getFingertipPath(hand, px, py, now, w, h);
+                    pathsThisFrame.push(path);
 
                     if (!state.isPlaying) continue;
 
@@ -916,6 +1389,16 @@
                 }
             }
 
+            // Collision Check: Dragon (either hand can boop it)
+            if (state.isPlaying && state.boss && state.boss.mode === 'active') {
+                for (const path of pathsThisFrame) {
+                    if (state.boss.isTouching(path, w, h) && state.boss.hit(now)) {
+                        onDragonHit(state.boss, now);
+                        break;
+                    }
+                }
+            }
+
             // Forget hands that left the view so their next appearance doesn't sweep across the screen
             ['left', 'right'].forEach(hand => {
                 if (!handsSeen.has(hand)) delete lastFingertip[hand];
@@ -929,6 +1412,7 @@
 
             // Draw Butterflies & Dust
             state.targets.forEach(t => t.draw(canvasCtx, w, h));
+            if (state.boss) state.boss.draw(canvasCtx, w, h);
             state.particles.forEach(p => p.draw(canvasCtx, w, h));
         }
 
