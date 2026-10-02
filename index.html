@@ -82,8 +82,13 @@
                 <div class="text-purple-800 text-sm font-bold">Magical Mirror Mode</div>
             </div>
 
+            <div class="glass-panel p-4 rounded-3xl text-center min-w-[100px]">
+                <div class="text-xs text-purple-800 uppercase tracking-widest font-bold">Time</div>
+                <div id="timer-display" class="text-4xl font-bold text-purple-600 magic-font">60</div>
+            </div>
+
             <div class="glass-panel p-4 rounded-3xl text-right min-w-[120px]">
-                <div class="text-xs text-purple-800 uppercase tracking-widest font-bold">Butterflies</div>
+                <div class="text-xs text-purple-800 uppercase tracking-widest font-bold">Score</div>
                 <div id="score-display" class="text-4xl font-bold text-pink-600 magic-font">0</div>
             </div>
         </div>
@@ -97,12 +102,23 @@
         <div id="menu-overlay" class="absolute inset-0 bg-white/60 flex flex-col items-center justify-center z-50 pointer-events-auto backdrop-blur-md">
             <div class="text-center max-w-lg p-8 bg-white/80 rounded-3xl shadow-2xl border-4 border-pink-200">
                 <h1 class="text-6xl magic-font text-pink-500 mb-4">Enchanted Forest</h1>
-                <p class="text-xl text-gray-600 mb-8 font-bold">
+                <!-- Shown after a round ends -->
+                <div id="round-results" class="hidden mb-6">
+                    <h2 id="results-title" class="text-4xl magic-font text-purple-500 mb-2">Time's Up!</h2>
+                    <div class="text-7xl magic-font text-pink-600 my-2" id="results-score">0</div>
+                    <p id="results-detail" class="text-lg text-gray-600 font-bold"></p>
+                    <p id="new-high-score" class="hidden mt-3 text-2xl magic-font text-yellow-500 drop-shadow-sm animate-bounce">New High Score!</p>
+                </div>
+
+                <p id="instructions" class="text-xl text-gray-600 mb-4 font-bold">
                     Stand back and use your hands to catch the butterflies.<br>
                     <span class="text-pink-500">Pink = Left Hand</span> <br>
                     <span class="text-teal-500">Teal = Right Hand</span> <br>
-                    <span class="text-base">Hold a finger on the flower to stop.</span>
+                    <span class="text-yellow-500">Gold = Either Hand, 5 points!</span> <br>
+                    <span class="text-base">Catch as many as you can in 60 seconds.<br>Hold a finger on the flower to stop early.</span>
                 </p>
+
+                <p id="best-score" class="hidden mb-6 text-lg text-purple-600 font-bold"></p>
 
                 <p id="error-msg" class="hidden mb-4 text-red-500 font-bold"></p>
                 
@@ -127,6 +143,10 @@
                 <div class="flex items-center gap-2">
                     <div class="w-4 h-4 rounded-full bg-teal-400 shadow-[0_0_10px_teal]"></div>
                     <span class="text-xs font-bold text-teal-700">Right Hand</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <div class="w-4 h-4 rounded-full bg-yellow-300 shadow-[0_0_10px_gold]"></div>
+                    <span class="text-xs font-bold text-yellow-700">Either Hand</span>
                 </div>
             </div>
         </div>
@@ -192,12 +212,43 @@
             }
         }
 
+        // A rising run of bell-like notes, for special moments
+        function playChime(freqs, spacing, volume) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const start = audioCtx.currentTime;
+
+            freqs.forEach((freq, i) => {
+                const osc = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                osc.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+
+                const t = start + i * spacing;
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(freq, t);
+                gainNode.gain.setValueAtTime(0, t);
+                gainNode.gain.linearRampToValueAtTime(volume, t + 0.03);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
+                osc.start(t);
+                osc.stop(t + 1.2);
+            });
+        }
+
         /**
          * GAME STATE
          */
+        const ROUND_DURATION = 60000; // 60 second rounds
+        const GOLDEN_CHANCE = 0.07;   // Chance a new butterfly is golden
+        const GOLDEN_POINTS = 5;
+        const HIGH_SCORE_KEY = 'butterflyCatcherHighScore';
+
         const state = {
             isPlaying: false,
             score: 0,
+            caught: 0,
+            goldenCaught: 0,
+            roundEndTime: 0,
+            highScore: 0,
             targets: [], 
             particles: [],
             lastSpawnTime: 0,
@@ -217,7 +268,43 @@
         const comboDisplay = document.getElementById('combo-display');
         const comboText = document.getElementById('combo-text');
         const errorMsg = document.getElementById('error-msg');
+        const timerEl = document.getElementById('timer-display');
+        const instructionsEl = document.getElementById('instructions');
+        const bestScoreEl = document.getElementById('best-score');
+        const roundResults = document.getElementById('round-results');
+        const resultsTitle = document.getElementById('results-title');
+        const resultsScore = document.getElementById('results-score');
+        const resultsDetail = document.getElementById('results-detail');
+        const newHighScoreEl = document.getElementById('new-high-score');
         let cameraRunning = false;
+
+        /**
+         * HIGH SCORE
+         * Saved in this browser; storage can be unavailable (e.g. private mode), so fail quietly.
+         */
+        function loadHighScore() {
+            try {
+                return parseInt(localStorage.getItem(HIGH_SCORE_KEY), 10) || 0;
+            } catch (e) {
+                return 0;
+            }
+        }
+
+        function saveHighScore(score) {
+            try {
+                localStorage.setItem(HIGH_SCORE_KEY, String(score));
+            } catch (e) {}
+        }
+
+        function showBestScore() {
+            if (state.highScore > 0) {
+                bestScoreEl.innerText = `Best score: ${state.highScore}`;
+                bestScoreEl.classList.remove('hidden');
+            }
+        }
+
+        state.highScore = loadHighScore();
+        showBestScore();
 
         /**
          * BUTTERFLY CLASS (Replaces Target)
@@ -228,17 +315,32 @@
                 this.x = x; 
                 this.y = y; 
                 this.radius = 0.08; 
-                this.type = type; // 'left' (pink) or 'right' (teal)
+                this.type = type; // 'left' (pink), 'right' (teal) or 'golden' (either hand)
                 this.active = true;
                 this.spawnTime = Date.now();
                 this.lifetime = 4000; // Live longer
                 this.flapSpeed = 0.1 + Math.random() * 0.1;
+                this.points = 1;
 
                 // Gentle wandering flight, kept on its own hand's side of the screen
                 this.heading = Math.random() * Math.PI * 2;
                 this.speed = 0.00003 + Math.random() * 0.00003; // per ms
                 this.minX = type === 'left' ? 0.1 : 0.55;
                 this.maxX = type === 'left' ? 0.45 : 0.9;
+
+                // Golden butterflies are rare, quick, and roam the whole screen
+                if (type === 'golden') {
+                    this.lifetime = 3000;
+                    this.flapSpeed = 0.2;
+                    this.points = GOLDEN_POINTS;
+                    this.speed *= 2.5;
+                    this.minX = 0.15;
+                    this.maxX = 0.85;
+                }
+            }
+
+            canBeCaughtBy(hand) {
+                return this.type === 'golden' || this.type === hand;
             }
 
             update(dt) {
@@ -277,7 +379,13 @@
 
                 // Set Color
                 let colorBase, colorStroke;
-                if (this.type === 'left') {
+                if (this.type === 'golden') {
+                    colorBase = 'rgba(250, 204, 21, 0.9)'; // Yellow-400
+                    colorStroke = 'rgba(255, 255, 255, 1)';
+                    // Shimmering glow
+                    ctx.shadowColor = 'rgba(253, 224, 71, 1)';
+                    ctx.shadowBlur = 20 + Math.sin(age * 0.01) * 10;
+                } else if (this.type === 'left') {
                     colorBase = 'rgba(244, 114, 182, 0.8)'; // Pink-400
                     colorStroke = 'rgba(253, 230, 138, 1)'; // Gold
                 } else {
@@ -460,10 +568,14 @@
         function spawnButterfly() {
             if (!state.isPlaying) return;
             
+            const goldenOnScreen = state.targets.some(t => t.type === 'golden');
+            const isGolden = !goldenOnScreen && Math.random() < GOLDEN_CHANCE;
             const isLeft = Math.random() > 0.5;
             let x, y;
 
-            if (isLeft) {
+            if (isGolden) {
+                x = 0.25 + (Math.random() * 0.5);
+            } else if (isLeft) {
                 x = 0.15 + (Math.random() * 0.25); 
             } else {
                 x = 0.6 + (Math.random() * 0.25);
@@ -471,7 +583,7 @@
             // Height variance
             y = 0.2 + (Math.random() * 0.6);
 
-            const type = isLeft ? 'left' : 'right';
+            const type = isGolden ? 'golden' : (isLeft ? 'left' : 'right');
             state.targets.push(new Butterfly(x, y, type));
             playSound('spawn');
             
@@ -480,19 +592,31 @@
             state.spawnInterval = speedMultiplier;
         }
 
-        function createSparkles(x, y, isLeft) {
-            const color = isLeft ? '#f472b6' : '#2dd4bf'; // Pink or Teal
+        function createSparkles(x, y, type) {
+            const colors = {
+                left: '#f472b6',   // Pink
+                right: '#2dd4bf',  // Teal
+                golden: '#ffffff'  // White, mixed with lots of gold
+            };
             const gold = '#fde047';
-            for(let i=0; i<12; i++) {
-                state.particles.push(new FairyDust(x, y, Math.random() > 0.5 ? color : gold));
+            const count = type === 'golden' ? 30 : 12;
+            for(let i=0; i<count; i++) {
+                state.particles.push(new FairyDust(x, y, Math.random() > 0.5 ? colors[type] : gold));
             }
         }
 
         let encouragementTimer = null;
+        let specialMessageUntil = 0;
 
-        function showEncouragement() {
-            const phrases = ["Magical!", "Lovely!", "Sparkle!", "So Gentle!", "Perfect!"];
-            const text = phrases[Math.floor(Math.random() * phrases.length)];
+        // Passing text marks a special message that ordinary praise won't cover up
+        function showEncouragement(text) {
+            if (text) {
+                specialMessageUntil = Date.now() + 800;
+            } else {
+                if (Date.now() < specialMessageUntil) return;
+                const phrases = ["Magical!", "Lovely!", "Sparkle!", "So Gentle!", "Perfect!"];
+                text = phrases[Math.floor(Math.random() * phrases.length)];
+            }
             comboText.innerText = text;
             // Restart the animation even if the previous one is still running
             clearTimeout(encouragementTimer);
@@ -506,15 +630,50 @@
             }, 800);
         }
 
-        function stopGame() {
+        function endRound(reason) {
             state.isPlaying = false;
             state.targets = [];
             state.particles = [];
             stopFlower.reset();
+
+            const isNewHighScore = state.score > state.highScore;
+            if (isNewHighScore) {
+                state.highScore = state.score;
+                saveHighScore(state.score);
+            }
+
+            resultsTitle.innerText = reason === 'time' ? "Time's Up!" : 'Round Ended';
+            resultsScore.innerText = state.score;
+            const plural = state.caught === 1 ? 'butterfly' : 'butterflies';
+            let detail = `You caught ${state.caught} ${plural}`;
+            if (state.goldenCaught > 0) detail += `, including ${state.goldenCaught} golden`;
+            resultsDetail.innerText = detail + '!';
+            newHighScoreEl.classList.toggle('hidden', !isNewHighScore);
+            roundResults.classList.remove('hidden');
+            instructionsEl.classList.add('hidden');
+            showBestScore();
+
             startBtn.innerText = 'Play Again';
             startBtn.classList.remove('hidden');
             menuOverlay.classList.remove('hidden');
-            playSound('quit');
+
+            if (isNewHighScore) {
+                playChime([523, 659, 784, 1047, 1319], 0.12, 0.2); // Celebratory run
+            } else if (reason === 'time') {
+                playChime([784, 659, 523], 0.15, 0.15);
+            } else {
+                playSound('quit');
+            }
+        }
+
+        function updateTimer(now) {
+            const secondsLeft = Math.max(0, Math.ceil((state.roundEndTime - now) / 1000));
+            timerEl.innerText = secondsLeft;
+            // Hurry-up glow in the final 10 seconds
+            const hurry = secondsLeft <= 10;
+            timerEl.classList.toggle('text-pink-600', hurry);
+            timerEl.classList.toggle('animate-pulse', hurry);
+            timerEl.classList.toggle('text-purple-600', !hurry);
         }
 
         function updateGame() {
@@ -523,6 +682,12 @@
             const now = Date.now();
             const dt = Math.min(100, now - state.lastUpdateTime); // Cap jumps after stalls
             state.lastUpdateTime = now;
+
+            updateTimer(now);
+            if (now >= state.roundEndTime) {
+                endRound('time');
+                return;
+            }
 
             if (now - state.lastSpawnTime > state.spawnInterval) {
                 spawnButterfly();
@@ -605,7 +770,11 @@
             menuOverlay.classList.add('hidden');
             state.isPlaying = true;
             state.score = 0;
+            state.caught = 0;
+            state.goldenCaught = 0;
             scoreEl.innerText = '0';
+            state.roundEndTime = Date.now() + ROUND_DURATION;
+            updateTimer(Date.now());
             state.lastSpawnTime = Date.now();
             state.lastUpdateTime = Date.now();
             state.targets = [];
@@ -677,13 +846,20 @@
 
                     // Collision Check: Butterflies
                     state.targets.forEach(target => {
-                        if (target.active && target.type === hand && checkCollision(px, py, target, w, h)) {
+                        if (target.active && target.canBeCaughtBy(hand) && checkCollision(px, py, target, w, h)) {
                             target.active = false;
-                            state.score += 1; // Catching is gentle, 1 point
+                            state.score += target.points;
+                            state.caught += 1;
                             scoreEl.innerText = state.score;
-                            playSound('catch');
-                            createSparkles(target.x, target.y, target.type === 'left');
-                            showEncouragement();
+                            createSparkles(target.x, target.y, target.type);
+                            if (target.type === 'golden') {
+                                state.goldenCaught += 1;
+                                playChime([1047, 1319, 1568, 2093], 0.07, 0.15);
+                                showEncouragement(`Golden! +${GOLDEN_POINTS}`);
+                            } else {
+                                playSound('catch');
+                                showEncouragement();
+                            }
                         }
                     });
                 }
@@ -691,7 +867,7 @@
 
             // Collision Check: Stop Flower (held, not just brushed)
             if (state.isPlaying && stopFlower.update(touchingFlower, Date.now())) {
-                stopGame();
+                endRound('stopped');
                 return;
             }
 
